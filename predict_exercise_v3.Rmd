@@ -1,0 +1,299 @@
+---
+title: "Predict the manner of an individual performing a weight lifting exercise"
+author: "Jathine Wong"
+date: "November 20, 2015"
+output: html_document
+---
+
+##Objective
+  
+        The goal of this project is to build a model to predict the manner of an individual did his/her exercise. 
+        The data are from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. 
+        They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+        We will select important features from the training data set, build a prediction model to predict the 
+        outcome of the provided test data set.
+        
+**_Data Source_**  
+  
+        The training data for this project are available here:  
+                https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+                
+        The test data are available here:  
+                https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+```{r loaddata, echo=FALSE, warning=FALSE, message=FALSE, results='hide', cache=TRUE}
+        library(RCurl)
+        train_filename <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        test_filename  <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        train_url <- getURL(train_filename, ssl.verifypeer=FALSE)
+        test_url  <- getURL(test_filename, ssl.verifypeer=FALSE)
+        train_data <- read.csv(textConnection(train_url))
+        final_data <- read.csv(textConnection(test_url))
+```
+
+
+**_Training and Testing Data Sets_** 
+
+We subset the provided training dataset further into a training set and a test set.
+We use the subsetted training set to select feature and to build a prediction model.
+
+### Feature Selection  
+
+        The training data set contains 160 variables and 19622 observations.  
+        There are 67 columns have 98% missing data.  
+        These variables are uninformative and we will exclude them from the analysis.  
+        There are 34 variables with near zero variance, they will be excluded.  
+        We also remove the variable X, new_window, and columns with substring of _timestamp.  
+
+```{r submission_function, echo=FALSE, warning=FALSE, message=FALSE, results='hide'}
+        pml_write_files = function(x){
+                n = length(x)
+                for(i in 1:n){
+                        filename = paste0("problem_id_",i,".txt")
+                        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+                }
+        }
+```
+
+```{r explore_data, echo=FALSE, warning=FALSE, message=FALSE, results='hide'}
+        library(caret)
+        library(randomForest)
+        dim(train_data) ## 19622  160
+        str(train_data)
+        summary(train_data)
+        
+        ## 19622 records, 160 variables
+        ## 4 types measurement - roll, pitch, yaw and total accel
+        ## 4 locations belt, arm, forarm, and dumbbell 
+        ## Three position x, y, z  
+        ## 5 classification, classe, A, B, C, D and E
+        ## kurtosis and skewness measure the exercise movement
+        
+        ## split the training data into train.5.train and train.5.test
+        inTrain <- createDataPartition(train_data$classe, p=0.75, list=FALSE)
+        trainset <- train_data[inTrain,]
+        testset  <- train_data[-inTrain,]
+        
+        ## check Column data distribution, if any with high % of NA
+        train_na <- colSums(is.na(trainset))
+        table(train_na)
+                
+        ## there are 67 columns has 14408 rows of NA / 14718, 98% missing data
+        ## Remove uninformative columns with >= 75% of missing rows
+        trainset.1 <- trainset[, colnames(trainset[(train_na/19622) < 0.25])]
+        dim(trainset.1) ## 14718    93
+        
+        ## check for near zero variables
+        nearZero <- nearZeroVar(trainset.1, saveMetrics=TRUE)
+        nearZero
+        trainset.2 <- trainset.1[,rownames(nearZero[!nearZero[,"nzv"],])]
+        dim(trainset.2) ## 14718    59
+        
+        ## Variables also consider not to include in the analysis
+        ## X
+        ## timestamp
+        ## new_window
+        unwanted <- grepl("^X|timestamp|^new_window", colnames(trainset.2))
+        trainset.3 <- trainset.2[, colnames(trainset.2[!unwanted])]
+        dim(trainset.3) ## 14718    55
+        
+```
+
+
+**Table 1 : Test for Near Zero Variance output**
+```{r nearZero, echo=FALSE, warning=FALSE, message=FALSE}
+        nearZero
+```
+
+
+### Plot Features
+Figure 1: Features of arms data.
+```{r feature_plots, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, fig.width=8.5}
+        library(caret)
+        source('O:/R/useful/multiplot.R', encoding = 'UTF-8')
+        
+        arms <- grepl("_arm$", colnames(trainset.3))
+        feature1 <- featurePlot(x=trainset.3[, arms], y=trainset.3$classe, plot="pairs")
+        
+        ## belts <- grepl("_belt$", colnames(trainset.3))
+        ## feature2 <- featurePlot(x=trainset.3[, belts], y=trainset.3$classe, plot="pairs")
+        
+        ## forearms <- grepl("_forearm$", colnames(trainset.3))
+        ## feature3 <- featurePlot(x=trainset.3[, forearms], y=trainset.3$classe, plot="pairs")
+        
+        ## dumbbells <- grepl("_dumbbell$", colnames(trainset.3))
+        ## feature4 <- featurePlot(x=trainset.3[, dumbbells], y=trainset.3$classe, plot="pairs")
+        
+        ##featurePlot(x=trainspar(mfrow=c(2,1))
+        feature1
+        
+        ##rm(feature1, feature2, feature3, feature4)
+```
+
+**_Selected Feature Data Summary_**
+```{r datasummary, echo=FALSE, warning=FALSE, message=FALSE}
+        summary(trainset.3)
+```
+
+## Prediction Model
+We examine two different prediction models, Boosting with PCA and Random Forest. 
+We will record the performance time and the accuracy of both methods for comparison.
+
+We specified Cross Validation in the trainControl function to control the computational 
+nuances of the train function.
+The train function also use the bootstrap resampling method as the default.
+
+### Boosting with PCA Result
+```{r model_gbm_pca, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+        library(gbm)
+        library(xtable)
+        set.seed(666)
+        train_ctrl <- trainControl(method="cv", allowParallel=TRUE)
+        ## gbm uses  bootstrapping for cross validation 
+        classe_index <- grep("classe", colnames(trainset.3))
+        prePCA <- preProcess(trainset.3[, -classe_index], method="pca", thresh = 0.8)
+        trainPCA <- predict(prePCA, trainset.3[, -classe_index])
+        system.time(model_gbm <- train(trainset.3$classe ~ ., method="gbm", trControl=train_ctrl, data=trainPCA, verbose=FALSE))
+        ##user      system elapsed 
+        ##674.93    4.65   702.18 
+        model_gbm
+        
+        ## Manually calculate In sample error of GBM with training dataset
+        ## pred_gbm.train <- predict(model_gbm, trainPCA)
+        ## 1 -  defaultSummary(data.frame(obs=trainset.3$classe, pred=pred_gbm.train))[1]
+        
+        gbm_ise <- 1 - model_gbm$result[model_gbm$results$n.trees==150 & model_gbm$results$interaction.depth == 3, ]$Accuracy
+        print(paste("GBM in sample error is ", round(gbm_ise, 3), sep=""))
+```
+
+
+**_Apply the GBM model to the test set_** 
+
+To predict the outcome of the test set, and to estimate the out of sample error 
+```{r gbm_pca_test, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+        ## Predict test data set
+        prePCA_test <- predict(prePCA, testset[, -classe_index])
+        pred_gbm.test <- predict(model_gbm, prePCA_test)
+        testset$predRight_gbm <- pred_gbm.test==testset$classe
+        ## table(pred_gbm.test, testset$classe)
+        
+        ## Accuracy of this model using the test data set 
+        confusionMatrix(testset$classe, pred_gbm.test)
+        
+        gbm_ose <- 1 -  defaultSummary(data.frame(obs=testset$classe, pred=pred_gbm.test))[1]
+        paste("GBM out of sample error is ", round(gbm_ose, 3), sep="")
+        ## Accuracy is 0.78, therefore out-of-sample error is 0.22
+```
+
+**_Figure 2 : Boosting Resampling Profile_**
+```{r gbm_pca_resample, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+        trellis.par.set(caretTheme())
+        plot(model_gbm)
+        rm(prePCA, trainPCA, model_gbm, prePCA_test, pred_gbm.train, pred_gbm.test)
+```
+
+### Random Forest Result
+We use Random forest with cross validation from train function to reduce overfitting
+
+```{r model_random_forest, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+        
+        set.seed(666)
+        system.time(modfit <- train(classe ~ ., data=trainset.3, method="rf", trControl=train_ctrl)) ## no prox=TRUE
+        
+        ##user       system elapsed 
+        ##1181.14    3.82 1185.30 
+
+        ## Model Detail
+        print(modfit, digits=3)
+        ## Accuracy is an average of the repeated cross validation, 0.997 at mtry = 30
+        modfit$finalModel
+       
+        ## Estimated in-of-sample-error is 
+        ## mtry = 30 has the highest accuracy 0.997
+        ## in-sample-error = 0.003
+        
+        rf_ise <- 1 - modfit$result[modfit$results$mtry==30, ]$Accuracy
+        paste("Random Forest in sample error is ", round(rf_ise, 4), sep="")
+        
+        ## If we use our final random forest model to predicte the train data to estimate the in-sample-error
+        ## we got an inflated accuracy. 
+        ## pred.train <- predict(modfit, trainset.3)
+        ## trainset.3$predRight <- pred.train==trainset.3$classe
+        ## table(pred.train, trainset$classe)
+        
+        ## ise <- sum(pred.train != trainset.3$classe) / length(pred.train)
+        ## ise  
+        ## or
+        ## 1 -  defaultSummary(data.frame(obs=trainset.3$classe, pred=predict(modfit, trainset.3)))[1]
+```
+
+**_Apply the Random Forest model to the test set_** 
+
+To predict the outcome and to estimate the out of sample error 
+```{r random_forest_test, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE}
+        ## Predict test data set 
+        pred.test <- predict(modfit, testset)
+        testset$predRight <- pred.test==testset$classe
+        table(pred.test, testset$classe)
+        
+        ## Estimated out-of-sample-error is 
+        rf_ose <- sum(pred.test != testset$classe) / length(pred.test)
+        ## or
+        ##1 -  defaultSummary(data.frame(obs=testset$classe, pred=pred.test))[1] ## 0.003466558
+        paste("Random Forest out of sample error is ", round(rf_ose, 4), sep="")
+```
+
+## Final Model
+We select random forest model as our final prediction model.
+Random Forest has higher accuracy, out of sample error is lower compared to Boosting with PCA mode.
+Random forest required a longer processing time, elapsed time of 1185.30 verses 702.18 at our initial run of the train data set.  
+The propose of this project is to accurately predict a test set of 20 observations, the random forest model should till be cost affective. 
+
+### Predicting Results of the provided test set
+
+        . Apply the feature selection to the test set
+```{r clean_testset, echo=FALSE, warning=FALSE, message=FALSE, results='hide'}
+        final.1 <- final_data[, colnames(final_data[(train_na/19622) < 0.25])]
+        final.1$classe <- NA
+        ##nzv_names <- c(rownames(nearZero[!nearZero[,"nzv"],]))
+        final.2 <- final.1[,rownames(nearZero[!nearZero[,"nzv"],])]
+        final.3 <- final.2[, colnames(final.2[!unwanted])]
+```
+        . We use the Random Forest Model to predict the test data set outcome
+```{r predict_test, echo=FALSE, warning=FALSE, message=FALSE}
+        pred_final <- predict(modfit, final.3)
+        ##paste("Predicted Result for the Test data set are ")
+        pred_final
+        pml_write_files(pred_final)
+```
+
+
+## Diagnostic  
+
+We will examine some of the interesting features from the training data set  
+
+**Figure 3 : We take a look at the top 20 important variables used in the random forest model**
+```{r figure2, echo=FALSE, warning=FALSE, message=FALSE}
+        plot(varImp(modfit), top=20)
+```
+
+**Figure 4 : Classe A gyros_arm_x data is less widely spread then the other 4 classes**
+```{r figure3, echo=FALSE, warning=FALSE, message=FALSE}
+        g_gyros_arm <- ggplot(trainset.3, aes(x=gyros_arm_x, y=gyros_arm_y, colour=gyros_arm_z)) + geom_point(alpha=0.3)
+        g_gyros_arm <- g_gyros_arm + facet_grid(classe ~ .)
+        g_gyros_arm 
+```
+
+**Figure 5 : Box plots of gyros arms position data**
+```{r figure4, echo=FALSE, warning=FALSE, message=FALSE, fig.width=8.5}
+        g_gyros_arm_x_box <- ggplot(trainset.3, aes(x=classe, y=gyros_arm_x, colour=classe)) + geom_boxplot(size=1)
+        g_gyros_arm_y_box <- ggplot(trainset.3, aes(x=classe, y=gyros_arm_y, colour=classe)) + geom_boxplot(size=1)
+        g_gyros_arm_z_box <- ggplot(trainset.3, aes(x=classe, y=gyros_arm_z, colour=classe)) + geom_boxplot(size=1)
+        
+        multiplot(g_gyros_arm_x_box, g_gyros_arm_y_box, g_gyros_arm_z_box, cols=3)
+```
+
+
+
+
+
